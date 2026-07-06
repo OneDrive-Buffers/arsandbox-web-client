@@ -1,0 +1,133 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>p5.js AR-Sandbox Lite (Kinect v1)</title>
+<script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
+<body>
+<style>
+  /* page background and canvas centering */
+  html,body{height:100%;margin:0}
+  body{display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,#f6f8fb,#e9eef6);}
+  canvas{max-width:100%;height:auto;}
+  /* websocket / debug UI */
+  #ws-ui{position:fixed;left:12px;top:12px;background:rgba(255,255,255,0.9);color:#111;padding:8px 10px;border-radius:6px;box-shadow:0 2px 8px rgba(0,0,0,0.08);font-family:Roboto,system-ui,sans-serif;font-size:13px;line-height:1.3}
+  #ws-ui .err{color:#a00}
+</style>
+<div id="ws-ui"><div id="status">WS: disconnected</div><div id="info">Waiting for depth…</div><div id="debug"></div></div>
+<script>
+let ws, img=null, ready=false;
+let lastMsg = null; // debug info about last received message
+let statusEl, infoEl, debugEl;
+let myFont = null;
+let wsStatus = 'disconnected';
+let wsAttempts = 0;
+let step=3, zScale=120, contour=6, water=true;
+
+function preload(){
+  // attempt to load a local font; fallback will be used by the page UI if this fails
+  myFont = loadFont('fonts/Roboto-Regular.ttf', () => { console.log('font loaded'); }, () => { console.warn('font failed to load'); myFont = null; });
+}
+
+function setup(){
+  createCanvas(900,600,WEBGL, {antialias:true, alpha:true}); pixelDensity(1);
+  // DOM UI elements (avoid drawing text inside WEBGL to bypass font loading requirements)
+  statusEl = document.getElementById('status'); infoEl = document.getElementById('info'); debugEl = document.getElementById('debug');
+  statusEl.innerText = 'WS: connecting...'; wsStatus = 'connecting';
+  connectWS();
+  noStroke();
+  if(myFont) textFont(myFont);
+}
+
+function connectWS(){
+  wsAttempts++;
+  wsStatus = 'connecting'; updateStatus();
+  try{
+    ws = new WebSocket('ws://localhost:8282/');
+  }catch(e){
+    console.error('ws constructor error', e); wsStatus = 'error'; updateStatus(); retryConnect(); return;
+  }
+  ws.onopen = () => { console.log('ws open'); wsStatus = 'open'; wsAttempts = 0; updateStatus(); };
+  ws.onmessage = ev => {
+    console.log('ws raw message:', ev.data);
+    try{
+      const o = JSON.parse(ev.data);
+      console.log('ws parsed message:', o);
+      lastMsg = { time: new Date().toLocaleTimeString(), keys: Object.keys(o), hasPng: !!o.png, pngSize: o.png ? o.png.length : 0 };
+      updateDebug();
+      loadImage(o.png, im => { img = im; ready = true; infoEl.innerText = 'Ready'; });
+    }catch(e){
+      console.error('ws message parse error', e);
+      lastMsg = { time: new Date().toLocaleTimeString(), error: String(e) };
+      updateDebug();
+    }
+  };
+  ws.onerror = ev => { console.error('ws error', ev); wsStatus = 'error'; updateStatus(); };
+  ws.onclose = ev => { console.log('ws close', ev); if(wsStatus !== 'open') wsStatus = 'closed'; updateStatus(); retryConnect(); };
+}
+
+function retryConnect(){
+  const delay = Math.min(5000, 1000 * wsAttempts);
+  setTimeout(()=>{ if(wsAttempts < 20) connectWS(); else { wsStatus='failed'; updateStatus(); } }, delay);
+}
+
+function updateStatus(){ if(statusEl) statusEl.innerText = 'WS: ' + wsStatus + (wsAttempts?(' (tries:'+wsAttempts+')'):''); }
+function updateDebug(){ if(debugEl) debugEl.innerText = lastMsg ? (lastMsg.error ? ('ERROR: '+lastMsg.error) : ('Last recv: '+lastMsg.time+' keys:'+lastMsg.keys.join(',')+' png:'+ (lastMsg.pngSize||0))) : ''; }
+
+function keyPressed(){
+  if(key==='W') water=!water;
+  if(key==='=') zScale+=10;
+  if(key==='-') zScale=Math.max(10,zScale-10);
+  if(key==='[') contour=Math.max(2,contour-1);
+  if(key===']') contour+=1;
+}
+
+function draw(){
+  // make p5 WebGL canvas transparent so the page background shows
+  clear();
+  orbitControl(1,1,0.1);
+  rotateX(-0.9); rotateY(0.5);
+
+  if(!ready){ resetMatrix(); // no canvas text; show status in DOM
+    infoEl.innerText = 'Waiting for depth…';
+    return; }
+
+  img.loadPixels();
+  const sx=2.5, sy=2.5;
+  translate(-img.width*sx/2, -img.height*sy/2, 0);
+
+  for(let y=0; y<img.height-1; y+=step){
+    beginShape(TRIANGLE_STRIP);
+    for(let x=0; x<img.width; x+=step){
+      let z1=h(x,y), z2=h(x,y+step);
+      stroke(cs(z1)); strokeWeight(cw(z1)); fill(cm(z1)); vertex(x*sx, y*sy, -zo(x,y,z1));
+      stroke(cs(z2)); strokeWeight(cw(z2)); fill(cm(z2)); vertex(x*sx,(y+step)*sy, -zo(x,y+step,z2));
+    }
+    endShape();
+  }
+  resetMatrix(); noStroke(); fill(230);
+  // update DOM info for controls
+  infoEl.innerText = 'W water  +/- Z  [] contour';
+  updateStatus(); updateDebug();
+}
+
+function pix(x,y){ return 4*(y*img.width+x); }
+function h(x,y){
+  x = constrain(x,0,img.width-1); y = constrain(y,0,img.height-1);
+  return (img.pixels[pix(x,y)]/255)*zScale; // grayscale
+}
+function cm(z){
+  if(z<10)  return color(30,60,160);
+  if(z<20)  return color(40,120,200);
+  if(z<40)  return color(60,170,80);
+  if(z<70)  return color(180,200,80);
+  if(z<100) return color(200,150,80);
+  return color(210);
+}
+function cs(z){ return (Math.floor(z/contour)%2===0)? color(255,255,255,60): color(0,0,0,0); }
+function cw(z){ return (Math.floor(z/contour)%5===0)? 1.5:0.5; }
+function zo(x,y,z){
+  if(!water) return z;
+  const t = frameCount*0.08;
+  return z + 8*Math.sin(0.07*x + 0.09*y + t) * (1 - z/zScale);
+}
+</script>
+</body>
